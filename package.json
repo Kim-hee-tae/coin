@@ -1,0 +1,10 @@
+{
+  "name": "coin",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Simple Node test page",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
