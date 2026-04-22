@@ -21,10 +21,10 @@ ENEMY_SIZE = 16
 PLAYER_SPEED = 7
 PLAYER_BULLET_SPEED = 11
 ENEMY_BULLET_SPEED = 6
-SEND_INTERVAL = 0.02
-SIM_INTERVAL = 0.012
+SEND_INTERVAL = 0.018
+SIM_INTERVAL = 0.01
 MAX_LEVEL = 10
-COUNTDOWN_SECONDS = 5
+COUNTDOWN_SECONDS = 3
 
 
 @dataclass
@@ -85,8 +85,11 @@ class AirplaneGameClient:
         self.paused = False
         self.game_started = False
         self.countdown_end_ts: float | None = None
+        self.countdown_remaining = COUNTDOWN_SECONDS
+        self.display_players: dict[int, PlayerState] = {}
 
         self.last_fire_time = {1: 0.0, 2: 0.0}
+        self.countdown_remaining = COUNTDOWN_SECONDS
         self.last_enemy_fire = 0.0
         self.enemy_id_seed = 1
         self.last_state_send = 0.0
@@ -110,6 +113,10 @@ class AirplaneGameClient:
 
     def init_players(self) -> None:
         self.players = {
+            1: PlayerState(1, WIDTH * 0.25, HEIGHT - 60),
+            2: PlayerState(2, WIDTH * 0.75, HEIGHT - 60),
+        }
+        self.display_players = {
             1: PlayerState(1, WIDTH * 0.25, HEIGHT - 60),
             2: PlayerState(2, WIDTH * 0.75, HEIGHT - 60),
         }
@@ -198,7 +205,7 @@ class AirplaneGameClient:
             self.send_world_state_if_needed()
 
         self.render()
-        self.root.after(12, self.game_tick)
+        self.root.after(10, self.game_tick)
 
     def process_messages_once(self) -> None:
         while True:
@@ -227,6 +234,7 @@ class AirplaneGameClient:
                     self.handle_control_message(msg)
             elif mtype == "countdown":
                 self.countdown_end_ts = float(msg.get("end_ts", 0.0))
+                self.countdown_remaining = int(msg.get("countdown_remaining", COUNTDOWN_SECONDS))
                 self.game_started = False
                 self.paused = False
                 self.game_over = False
@@ -271,7 +279,8 @@ class AirplaneGameClient:
         self.reset_match_state()
         self.countdown_end_ts = time.time() + COUNTDOWN_SECONDS
         self.status_var.set(f"{reason}: {COUNTDOWN_SECONDS}초 후 시작")
-        self.safe_send({"type": "countdown", "end_ts": self.countdown_end_ts})
+        self.countdown_remaining = COUNTDOWN_SECONDS
+        self.safe_send({"type": "countdown", "end_ts": self.countdown_end_ts, "countdown_remaining": COUNTDOWN_SECONDS})
 
     def reset_match_state(self) -> None:
         self.init_players()
@@ -287,6 +296,7 @@ class AirplaneGameClient:
         self.last_enemy_fire = 0.0
         self.enemy_id_seed = 1
         self.last_fire_time = {1: 0.0, 2: 0.0}
+        self.countdown_remaining = COUNTDOWN_SECONDS
 
     def send_input_if_needed(self) -> None:
         now = time.time()
@@ -313,10 +323,12 @@ class AirplaneGameClient:
                 return
             remain = self.countdown_end_ts - time.time()
             if remain > 0:
-                self.status_var.set(f"모든 플레이어 입장 완료. {int(math.ceil(remain))}초 후 시작")
+                self.countdown_remaining = int(math.ceil(remain))
+                self.status_var.set(f"모든 플레이어 입장 완료. {self.countdown_remaining}초 후 시작")
                 return
 
             self.game_started = True
+            self.countdown_remaining = 0
             self.spawn_level_enemies(reset=True)
             self.status_var.set("게임 시작!")
 
@@ -508,6 +520,7 @@ class AirplaneGameClient:
             "paused": self.paused,
             "game_started": self.game_started,
             "countdown_end_ts": self.countdown_end_ts,
+            "countdown_remaining": self.countdown_remaining,
         }
         self.safe_send(payload)
 
@@ -528,6 +541,7 @@ class AirplaneGameClient:
         self.paused = bool(msg.get("paused", False))
         self.game_started = bool(msg.get("game_started", False))
         self.countdown_end_ts = msg.get("countdown_end_ts", self.countdown_end_ts)
+        self.countdown_remaining = int(msg.get("countdown_remaining", self.countdown_remaining))
         if self.winner_text:
             self.status_var.set(self.winner_text)
 
@@ -540,6 +554,7 @@ class AirplaneGameClient:
 
     def render(self) -> None:
         self.canvas.delete("all")
+        self.update_display_positions()
         self.draw_stars()
         self.draw_hud()
 
@@ -549,9 +564,23 @@ class AirplaneGameClient:
             self.draw_missile(m)
         for pid in (1, 2):
             if pid in self.players:
-                self.draw_player(self.players[pid], pid == self.player_id)
+                self.draw_player(self.display_players.get(pid, self.players[pid]), pid == self.player_id)
 
         self.draw_overlay()
+
+    def update_display_positions(self) -> None:
+        for pid, p in self.players.items():
+            d = self.display_players.get(pid)
+            if d is None:
+                self.display_players[pid] = PlayerState(p.player_id, p.x, p.y, p.alive, p.score)
+                continue
+
+            # 호스트는 즉시 반영, 원격은 보간으로 부드럽게 이동
+            alpha = 1.0 if self.player_id == 1 else 0.38
+            d.x += (p.x - d.x) * alpha
+            d.y += (p.y - d.y) * alpha
+            d.alive = p.alive
+            d.score = p.score
 
     def draw_overlay(self) -> None:
         if self.game_over:
@@ -566,9 +595,7 @@ class AirplaneGameClient:
             return
 
         if not self.game_started:
-            remain = 0
-            if self.countdown_end_ts:
-                remain = max(0, int(math.ceil(self.countdown_end_ts - time.time())))
+            remain = self.countdown_remaining
             msg = "2명 접속 대기 중" if len(self.connected_players) < 2 else f"{remain}초 후 시작"
             self.canvas.create_rectangle(280, 260, WIDTH - 280, 320, fill="#000000", outline="white")
             self.canvas.create_text(WIDTH // 2, 290, text=msg, fill="#f9fafb", font=("Arial", 16, "bold"))
