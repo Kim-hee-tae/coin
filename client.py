@@ -21,8 +21,8 @@ ENEMY_SIZE = 16
 PLAYER_SPEED = 7
 PLAYER_BULLET_SPEED = 11
 ENEMY_BULLET_SPEED = 6
-SEND_INTERVAL = 0.04
-SIM_INTERVAL = 0.016
+SEND_INTERVAL = 0.02
+SIM_INTERVAL = 0.012
 MAX_LEVEL = 10
 COUNTDOWN_SECONDS = 5
 
@@ -198,7 +198,7 @@ class AirplaneGameClient:
             self.send_world_state_if_needed()
 
         self.render()
-        self.root.after(16, self.game_tick)
+        self.root.after(12, self.game_tick)
 
     def process_messages_once(self) -> None:
         while True:
@@ -302,6 +302,7 @@ class AirplaneGameClient:
         dt = now - self.last_sim
         if dt < SIM_INTERVAL:
             return
+        dt = min(dt, 0.033)
         self.last_sim = now
 
         if len(self.connected_players) < 2:
@@ -316,7 +317,7 @@ class AirplaneGameClient:
                 return
 
             self.game_started = True
-            self.spawn_level_enemies()
+            self.spawn_level_enemies(reset=True)
             self.status_var.set("게임 시작!")
 
         if self.game_over or self.paused:
@@ -435,24 +436,38 @@ class AirplaneGameClient:
     def check_level_progress(self) -> None:
         if self.game_over:
             return
-        if self.kills_in_level < self.level_target:
-            return
-        if self.level >= MAX_LEVEL:
-            self.finish_game(reason="10단계 클리어")
+
+        if self.kills_in_level >= self.level_target:
+            if self.level >= MAX_LEVEL:
+                self.finish_game(reason="10단계 클리어")
+                return
+
+            self.level += 1
+            self.kills_in_level = 0
+            self.level_target = self.get_level_target(self.level)
+            self.spawn_level_enemies(reset=True)
             return
 
-        self.level += 1
-        self.kills_in_level = 0
-        self.level_target = self.get_level_target(self.level)
-        self.spawn_level_enemies()
+        # 단계 목표 처치 수가 현재 웨이브 적 수보다 큰 경우를 위해 증원 웨이브 추가
+        if not self.enemies:
+            self.spawn_level_enemies(reset=False)
 
-    def spawn_level_enemies(self) -> None:
-        self.enemies.clear()
-        count = 4 + self.level * 2
+    def spawn_level_enemies(self, reset: bool) -> None:
+        if reset:
+            self.enemies.clear()
+
+        remaining = max(0, self.level_target - self.kills_in_level)
+        if remaining == 0:
+            return
+
+        base_count = 4 + self.level * 2
+        count = min(base_count, remaining + 2)
         hp = 1 if self.level <= 3 else (2 if self.level <= 7 else 3)
+        min_y, max_y = (70, 220) if reset else (60, 180)
+
         for _ in range(count):
             x = random.randint(ENEMY_SIZE + 10, WIDTH - ENEMY_SIZE - 10)
-            y = random.randint(70, 220)
+            y = random.randint(min_y, max_y)
             vx = random.choice([-1, 1]) * (1.2 + self.level * 0.15)
             self.enemies.append(EnemyState(eid=self.enemy_id_seed, x=x, y=y, hp=hp, vx=vx))
             self.enemy_id_seed += 1
@@ -602,7 +617,11 @@ class AirplaneGameClient:
         self.canvas.create_text(x, y, text=str(e.hp), fill="white")
 
     def draw_missile(self, m: MissileState) -> None:
-        color = "#fbbf24" if m.owner.startswith("p") else "#a78bfa"
+        color = "#a78bfa"
+        if m.owner == "p1":
+            color = "#ef4444"
+        elif m.owner == "p2":
+            color = "#3b82f6"
         self.canvas.create_oval(m.x - 3, m.y - 6, m.x + 3, m.y + 6, fill=color, outline="")
 
     def run(self) -> None:
