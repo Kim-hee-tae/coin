@@ -621,11 +621,19 @@ class AirplaneGameClient:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="2인 소켓 비행기 게임 클라이언트")
-    parser.add_argument("--host", default="127.0.0.1", help="서버 IP")
+    parser.add_argument("--host", default="", help="서버 IP (미입력 시 실행 중에 질문)")
     parser.add_argument("--port", type=int, default=5000, help="서버 포트")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    AirplaneGameClient(args.host, args.port).run()
+    host = args.host.strip()
+    if not host:
+        try:
+            entered = input("서버 IP를 입력하세요 (엔터=127.0.0.1): ").strip()
+            host = entered or "127.0.0.1"
+        except EOFError:
+            host = "127.0.0.1"
+
+    AirplaneGameClient(host, args.port).run()

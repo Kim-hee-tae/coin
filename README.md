@@ -12,26 +12,49 @@
 - **승패 판정**: 게임 종료 시 **더 많이 적군을 처치한 플레이어 승리**.
 - **점수 표시**: 상단 HUD에 단계, 단계 목표, P1/P2 점수와 생존 상태 표시.
 
+## 배포 방식 (요청사항 반영)
+질문하신 것처럼, **모든 플레이어가 소스코드를 가질 필요는 없습니다.**
+
+- 서버 PC: `server.py`만 실행
+- 플레이어 PC: 빌드된 실행 파일(`.exe` 또는 단일 바이너리)만 실행
+
+즉, 소스는 서버/빌드 담당자만 가지고 있고, 플레이어는 실행 파일만 받아서 접속하면 됩니다.
+
 ## 파일 구성
 - `server.py`: 2명 연결 + 메시지 중계 서버
 - `client.py`: 게임 클라이언트(UI, 게임 로직, 렌더링)
+- `scripts/build_client_exe.sh`: Linux/macOS용 클라이언트 실행파일 빌드 스크립트
+- `scripts/build_client_exe.bat`: Windows용 클라이언트 실행파일 빌드 스크립트
 
-## 실행 방법
-
-### 1) 서버 실행 (한 명)
+## 1) 서버 실행 (서버 PC)
 ```bash
 python3 server.py --host 0.0.0.0 --port 5000
 ```
 
-### 2) 클라이언트 실행 (각 플레이어)
-```bash
-python3 client.py --host <서버IP> --port 5000
-```
+## 2) 클라이언트 실행파일 빌드 (빌드 PC)
 
-로컬 테스트(같은 PC 두 창):
-```bash
-python3 client.py --host 127.0.0.1 --port 5000
+### Windows
+```bat
+scripts\build_client_exe.bat
 ```
+빌드 결과: `dist\AirBattleClient.exe`
+
+### Linux / macOS
+```bash
+bash scripts/build_client_exe.sh
+```
+빌드 결과: `dist/AirBattleClient`
+
+## 3) 플레이어 PC에서 실행
+
+빌드된 실행파일만 전달한 뒤 각 PC에서 실행:
+- `AirBattleClient.exe` (Windows)
+- `AirBattleClient` (Linux/macOS)
+
+실행 시 서버 IP를 물어보면 서버 PC의 IP(예: `192.168.0.10`)를 입력하세요.
+
+> 명령행 인자 방식도 가능:
+> `AirBattleClient.exe --host 192.168.0.10 --port 5000`
 
 ## 조작키
 - 이동: 방향키 또는 `WASD`
