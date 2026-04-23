@@ -25,7 +25,7 @@ SEND_INTERVAL = 0.018
 SIM_INTERVAL = 0.01
 MAX_LEVEL = 10
 COUNTDOWN_SECONDS = 3
-POWERUP_DURATION = 3.0
+POWERUP_DURATION = 5.0
 ITEM_FALL_SPEED = 2.4
 BOSS_FIRE_INTERVAL_BASE = 1.3
 ENEMY_SPREAD_FIRE_INTERVAL = 1.0
@@ -73,6 +73,14 @@ class ItemState:
     y: float
 
 
+@dataclass
+class EffectState:
+    kind: str
+    x: float
+    y: float
+    ttl: float
+
+
 class AirplaneGameClient:
     def __init__(self, host: str, port: int, mode: str = "multi") -> None:
         self.mode = mode
@@ -100,6 +108,7 @@ class AirplaneGameClient:
         self.enemies: list[EnemyState] = []
         self.missiles: list[MissileState] = []
         self.items: list[ItemState] = []
+        self.effects: list[EffectState] = []
         self.level = 1
         self.kills_in_level = 0
         self.level_target = self.get_level_target(1)
@@ -118,6 +127,8 @@ class AirplaneGameClient:
 
         self.last_fire_time = {1: 0.0, 2: 0.0}
         self.homing_until = {1: 0.0, 2: 0.0}
+        self.spread_level = {1: 1, 2: 1}
+        self.speed_multiplier = {1: 1.0, 2: 1.0}
         self.bombs_remaining = {1: 2, 2: 2}
         self.invuln_until = {1: 0.0, 2: 0.0}
         self.countdown_remaining = COUNTDOWN_SECONDS
@@ -406,11 +417,14 @@ class AirplaneGameClient:
         if self.bombs_remaining.get(player_id, 0) <= 0:
             return
         self.bombs_remaining[player_id] -= 1
+        self.effects.append(EffectState(kind="bomb", x=WIDTH / 2, y=HEIGHT / 2, ttl=0.55))
         removed: list[EnemyState] = []
         for e in self.enemies:
             if not e.boss and e.hp > 0:
                 e.hp = 0
                 removed.append(e)
+            elif e.boss and e.hp > 1:
+                e.hp = max(1, e.hp // 2)
         for e in removed:
             self.on_enemy_destroyed(e, player_id)
         self.enemies = [e for e in self.enemies if e.hp > 0]
@@ -431,6 +445,7 @@ class AirplaneGameClient:
         self.enemies.clear()
         self.missiles.clear()
         self.items.clear()
+        self.effects.clear()
         self.level = 1
         self.kills_in_level = 0
         self.level_target = self.get_level_target(1)
@@ -447,6 +462,8 @@ class AirplaneGameClient:
         self.enemy_id_seed = 1
         self.last_fire_time = {1: 0.0, 2: 0.0}
         self.homing_until = {1: 0.0, 2: 0.0}
+        self.spread_level = {1: 1, 2: 1}
+        self.speed_multiplier = {1: 1.0, 2: 1.0}
         self.bombs_remaining = {1: 2, 2: 2}
         self.invuln_until = {1: 0.0, 2: 0.0}
         self.countdown_remaining = COUNTDOWN_SECONDS
@@ -500,6 +517,7 @@ class AirplaneGameClient:
         self.update_enemies(dt)
         self.update_missiles(dt)
         self.update_items(dt)
+        self.update_effects(dt)
         self.handle_collisions()
         self.check_level_progress()
 
@@ -533,9 +551,18 @@ class AirplaneGameClient:
         if not p.alive:
             return
         homing = time.time() < self.homing_until.get(pid, 0.0)
-        self.missiles.append(
-            MissileState(owner=f"p{pid}", x=p.x, y=p.y - PLAYER_SIZE, vx=0, vy=-PLAYER_BULLET_SPEED, homing=homing)
-        )
+        spread = self.spread_level.get(pid, 1)
+        if spread >= 3:
+            offsets = [-12, 0, 12]
+        elif spread == 2:
+            offsets = [-8, 8]
+        else:
+            offsets = [0]
+        speed = PLAYER_BULLET_SPEED * self.speed_multiplier.get(pid, 1.0)
+        for off in offsets:
+            self.missiles.append(
+                MissileState(owner=f"p{pid}", x=p.x + off, y=p.y - PLAYER_SIZE, vx=0, vy=-speed, homing=homing)
+            )
 
     def update_enemies(self, dt: float) -> None:
         for e in self.enemies:
@@ -662,11 +689,25 @@ class AirplaneGameClient:
                 if abs(item.x - p.x) < 24 and abs(item.y - p.y) < 24:
                     if item.kind == "homing":
                         self.homing_until[pid] = time.time() + POWERUP_DURATION
+                    elif item.kind == "dual":
+                        self.spread_level[pid] = max(self.spread_level.get(pid, 1), 2)
+                    elif item.kind == "triple":
+                        self.spread_level[pid] = max(self.spread_level.get(pid, 1), 3)
+                    elif item.kind == "speed":
+                        self.speed_multiplier[pid] = 2.0
                     collected = True
                     break
             if not collected and item.y < HEIGHT + 40:
                 active.append(item)
         self.items = active
+
+    def update_effects(self, dt: float) -> None:
+        next_effects: list[EffectState] = []
+        for fx in self.effects:
+            fx.ttl -= dt
+            if fx.ttl > 0:
+                next_effects.append(fx)
+        self.effects = next_effects
 
     def handle_collisions(self) -> None:
         kept_missiles: list[MissileState] = []
@@ -717,7 +758,8 @@ class AirplaneGameClient:
         if not enemy.boss:
             self.stage_grunt_killed += 1
         if enemy.carrier and self.stage_item_spawned < self.stage_item_quota:
-            self.items.append(ItemState(kind="homing", x=enemy.x, y=enemy.y))
+            drop_kind = random.choice(["homing", "dual", "triple", "speed"])
+            self.items.append(ItemState(kind=drop_kind, x=enemy.x, y=enemy.y))
             self.stage_item_spawned += 1
 
     def check_level_progress(self) -> None:
@@ -844,6 +886,7 @@ class AirplaneGameClient:
             "enemies": [asdict(e) for e in self.enemies],
             "missiles": [asdict(m) for m in self.missiles],
             "items": [asdict(i) for i in self.items],
+            "effects": [asdict(fx) for fx in self.effects],
             "level": self.level,
             "kills_in_level": self.kills_in_level,
             "level_target": self.level_target,
@@ -853,6 +896,8 @@ class AirplaneGameClient:
             "stage_item_quota": self.stage_item_quota,
             "stage_item_spawned": self.stage_item_spawned,
             "homing_until": self.homing_until,
+            "spread_level": self.spread_level,
+            "speed_multiplier": self.speed_multiplier,
             "bombs_remaining": self.bombs_remaining,
             "invuln_until": self.invuln_until,
             "game_over": self.game_over,
@@ -874,6 +919,7 @@ class AirplaneGameClient:
         self.enemies = [EnemyState(**e) for e in msg.get("enemies", [])]
         self.missiles = [MissileState(**m) for m in msg.get("missiles", [])]
         self.items = [ItemState(**i) for i in msg.get("items", [])]
+        self.effects = [EffectState(**fx) for fx in msg.get("effects", [])]
         self.level = int(msg.get("level", self.level))
         self.kills_in_level = int(msg.get("kills_in_level", self.kills_in_level))
         self.level_target = int(msg.get("level_target", self.level_target))
@@ -884,6 +930,10 @@ class AirplaneGameClient:
         self.stage_item_spawned = int(msg.get("stage_item_spawned", self.stage_item_spawned))
         homing_until = msg.get("homing_until", self.homing_until)
         self.homing_until = {int(k): float(v) for k, v in homing_until.items()}
+        spread_level = msg.get("spread_level", self.spread_level)
+        self.spread_level = {int(k): int(v) for k, v in spread_level.items()}
+        speed_multiplier = msg.get("speed_multiplier", self.speed_multiplier)
+        self.speed_multiplier = {int(k): float(v) for k, v in speed_multiplier.items()}
         bombs_remaining = msg.get("bombs_remaining", self.bombs_remaining)
         self.bombs_remaining = {int(k): int(v) for k, v in bombs_remaining.items()}
         invuln_until = msg.get("invuln_until", self.invuln_until)
@@ -916,6 +966,8 @@ class AirplaneGameClient:
             self.draw_enemy(e)
         for item in self.items:
             self.draw_item(item)
+        for fx in self.effects:
+            self.draw_effect(fx)
         for m in self.missiles:
             self.draw_missile(m)
         for pid in sorted(self.players.keys()):
@@ -978,10 +1030,14 @@ class AirplaneGameClient:
 
         now = time.time()
         p1_buff = max(0, int(self.homing_until.get(1, 0.0) - now))
-        buff_text = f"유도미사일 P1:{p1_buff}s"
+        buff_text = (
+            f"유도 P1:{p1_buff}s / 연사x{self.spread_level.get(1,1)} / 속도x{self.speed_multiplier.get(1,1.0):.1f}"
+        )
         if p2 is not None:
             p2_buff = max(0, int(self.homing_until.get(2, 0.0) - now))
-            buff_text += f" / P2:{p2_buff}s"
+            buff_text += (
+                f" || P2 유도:{p2_buff}s / 연사x{self.spread_level.get(2,1)} / 속도x{self.speed_multiplier.get(2,1.0):.1f}"
+            )
         self.canvas.create_text(
             10,
             10,
@@ -1048,9 +1104,29 @@ class AirplaneGameClient:
 
     def draw_item(self, item: ItemState) -> None:
         x, y = item.x, item.y
-        if item.kind == "homing":
-            self.canvas.create_oval(x - 10, y - 10, x + 10, y + 10, fill="#22d3ee", outline="#e0f2fe", width=2)
-            self.canvas.create_text(x, y, text="H", fill="#082f49", font=("Arial", 10, "bold"))
+        style = {
+            "homing": ("#22d3ee", "#e0f2fe", "H"),
+            "dual": ("#a78bfa", "#ede9fe", "2"),
+            "triple": ("#f59e0b", "#fef3c7", "3"),
+            "speed": ("#34d399", "#d1fae5", "S"),
+        }.get(item.kind, ("#94a3b8", "#e2e8f0", "?"))
+        fill, outline, label = style
+        self.canvas.create_oval(x - 10, y - 10, x + 10, y + 10, fill=fill, outline=outline, width=2)
+        self.canvas.create_text(x, y, text=label, fill="#082f49", font=("Arial", 10, "bold"))
+
+    def draw_effect(self, fx: EffectState) -> None:
+        if fx.kind == "bomb":
+            progress = max(0.0, min(1.0, 1.0 - fx.ttl / 0.55))
+            radius = 40 + progress * 520
+            alpha_color = "#fef08a" if progress < 0.5 else "#fb7185"
+            self.canvas.create_oval(
+                fx.x - radius,
+                fx.y - radius,
+                fx.x + radius,
+                fx.y + radius,
+                outline=alpha_color,
+                width=3,
+            )
 
     def draw_missile(self, m: MissileState) -> None:
         color = "#a78bfa"
