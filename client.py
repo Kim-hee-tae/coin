@@ -115,22 +115,17 @@ class AirplaneGameClient:
         return 5 + (level - 1) * 3
 
     def init_players(self) -> None:
-        self.players = {
-            1: PlayerState(1, WIDTH * 0.25, HEIGHT - 60),
-            2: PlayerState(2, WIDTH * 0.75, HEIGHT - 60),
-        }
-        self.display_players = {
-            1: PlayerState(1, WIDTH * 0.25, HEIGHT - 60),
-            2: PlayerState(2, WIDTH * 0.75, HEIGHT - 60),
-        }
+        self.players = {1: PlayerState(1, WIDTH * 0.25, HEIGHT - 60)}
+        self.display_players = {1: PlayerState(1, WIDTH * 0.25, HEIGHT - 60)}
+        if self.network_enabled:
+            self.players[2] = PlayerState(2, WIDTH * 0.75, HEIGHT - 60)
+            self.display_players[2] = PlayerState(2, WIDTH * 0.75, HEIGHT - 60)
 
     def connect(self) -> None:
         if not self.network_enabled:
             self.player_id = 1
             self.connected_players = {1}
             self.init_players()
-            self.players[2].alive = False
-            self.display_players[2].alive = False
             self.try_schedule_start_countdown("싱글플레이")
             self.status_var.set("싱글플레이 준비 완료")
             return
@@ -367,8 +362,7 @@ class AirplaneGameClient:
         self.check_level_progress()
 
     def update_players(self, dt: float) -> None:
-        for pid in (1, 2):
-            p = self.players[pid]
+        for pid, p in self.players.items():
             if not p.alive:
                 continue
             inp = self.remote_input.get(pid, {})
@@ -595,11 +589,8 @@ class AirplaneGameClient:
             self.draw_enemy(e)
         for m in self.missiles:
             self.draw_missile(m)
-        for pid in (1, 2):
-            if not self.network_enabled and pid == 2:
-                continue
-            if pid in self.players:
-                self.draw_player(self.display_players.get(pid, self.players[pid]), pid == self.player_id)
+        for pid in sorted(self.players.keys()):
+            self.draw_player(self.display_players.get(pid, self.players[pid]), pid == self.player_id)
 
         self.draw_overlay()
 
@@ -642,18 +633,20 @@ class AirplaneGameClient:
 
     def draw_hud(self) -> None:
         p1 = self.players.get(1, PlayerState(1, 0, 0))
-        p2 = self.players.get(2, PlayerState(2, 0, 0))
+        p2 = self.players.get(2)
+        score_text = (
+            f"Stage {self.level}/{MAX_LEVEL} | 단계 처치: {self.kills_in_level}/{self.level_target}"
+            f" | P1 점수:{p1.score} ({'생존' if p1.alive else '사망'})"
+        )
+        if p2 is not None:
+            score_text += f" | P2 점수:{p2.score} ({'생존' if p2.alive else '사망'})"
+        score_text += f" | 접속:{len(self.connected_players)}/{self.required_players}"
         self.canvas.create_text(
             10,
             10,
             anchor="nw",
             fill="white",
-            text=(
-                f"Stage {self.level}/{MAX_LEVEL} | 단계 처치: {self.kills_in_level}/{self.level_target}"
-                f" | P1 점수:{p1.score} ({'생존' if p1.alive else '사망'})"
-                f" | P2 점수:{p2.score} ({'생존' if p2.alive else '사망'})"
-                f" | 접속:{len(self.connected_players)}/{self.required_players}"
-            ),
+            text=score_text,
         )
         self.canvas.create_text(
             10,
