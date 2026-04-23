@@ -55,10 +55,13 @@ class MissileState:
 
 
 class AirplaneGameClient:
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(self, host: str, port: int, mode: str = "multi") -> None:
+        self.mode = mode
+        self.network_enabled = mode == "multi"
+        self.required_players = 2 if self.network_enabled else 1
         self.host = host
         self.port = port
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM) if self.network_enabled else None
         self.recv_queue: queue.Queue[dict] = queue.Queue()
         self.running = True
 
@@ -122,6 +125,16 @@ class AirplaneGameClient:
         }
 
     def connect(self) -> None:
+        if not self.network_enabled:
+            self.player_id = 1
+            self.connected_players = {1}
+            self.init_players()
+            self.players[2].alive = False
+            self.display_players[2].alive = False
+            self.try_schedule_start_countdown("싱글플레이")
+            self.status_var.set("싱글플레이 준비 완료")
+            return
+
         self.sock.connect((self.host, self.port))
         threading.Thread(target=self.recv_loop, daemon=True).start()
 
@@ -173,9 +186,16 @@ class AirplaneGameClient:
         elif k in ("space", "return"):
             self.local_input["fire"] = True
         elif k == "p":
-            self.send_control("toggle_pause")
+            if self.network_enabled:
+                self.send_control("toggle_pause")
+            elif self.game_started and not self.game_over:
+                self.paused = not self.paused
         elif k == "r":
-            self.send_control("restart")
+            if self.network_enabled:
+                self.send_control("restart")
+            else:
+                self.reset_match_state()
+                self.try_schedule_start_countdown("재시작")
 
     def on_key_release(self, event: tk.Event) -> None:
         k = event.keysym.lower()
@@ -191,6 +211,8 @@ class AirplaneGameClient:
             self.local_input["fire"] = False
 
     def send_control(self, action: str) -> None:
+        if not self.network_enabled:
+            return
         self.safe_send({"type": "control", "action": action})
 
     def game_tick(self) -> None:
@@ -272,8 +294,8 @@ class AirplaneGameClient:
             self.try_schedule_start_countdown("재시작")
 
     def try_schedule_start_countdown(self, reason: str) -> None:
-        if len(self.connected_players) < 2:
-            self.status_var.set("2명 접속 대기 중...")
+        if len(self.connected_players) < self.required_players:
+            self.status_var.set("2명 접속 대기 중..." if self.network_enabled else "싱글플레이 준비 중...")
             return
 
         self.reset_match_state()
@@ -299,6 +321,8 @@ class AirplaneGameClient:
         self.countdown_remaining = COUNTDOWN_SECONDS
 
     def send_input_if_needed(self) -> None:
+        if not self.network_enabled:
+            return
         now = time.time()
         if now - self.last_input_send < SEND_INTERVAL:
             return
@@ -315,7 +339,7 @@ class AirplaneGameClient:
         dt = min(dt, 0.033)
         self.last_sim = now
 
-        if len(self.connected_players) < 2:
+        if len(self.connected_players) < self.required_players:
             return
 
         if not self.game_started:
@@ -490,6 +514,11 @@ class AirplaneGameClient:
         self.game_over = True
 
         p1 = self.players[1]
+        if not self.network_enabled:
+            self.winner_text = f"{reason} | 싱글플레이 최종 점수: {p1.score}"
+            self.status_var.set(self.winner_text)
+            return
+
         p2 = self.players[2]
         if p1.score > p2.score:
             winner = "플레이어 1 승리"
@@ -502,6 +531,8 @@ class AirplaneGameClient:
         self.status_var.set(self.winner_text)
 
     def send_world_state_if_needed(self) -> None:
+        if not self.network_enabled:
+            return
         now = time.time()
         if now - self.last_state_send < SEND_INTERVAL:
             return
@@ -546,6 +577,8 @@ class AirplaneGameClient:
             self.status_var.set(self.winner_text)
 
     def safe_send(self, payload: dict) -> None:
+        if not self.network_enabled or self.sock is None:
+            return
         try:
             self.sock.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode(ENCODING))
         except OSError:
@@ -563,6 +596,8 @@ class AirplaneGameClient:
         for m in self.missiles:
             self.draw_missile(m)
         for pid in (1, 2):
+            if not self.network_enabled and pid == 2:
+                continue
             if pid in self.players:
                 self.draw_player(self.display_players.get(pid, self.players[pid]), pid == self.player_id)
 
@@ -596,7 +631,7 @@ class AirplaneGameClient:
 
         if not self.game_started:
             remain = self.countdown_remaining
-            msg = "2명 접속 대기 중" if len(self.connected_players) < 2 else f"{remain}초 후 시작"
+            msg = ("2명 접속 대기 중" if self.network_enabled else "싱글플레이 준비 중") if len(self.connected_players) < self.required_players else f"{remain}초 후 시작"
             self.canvas.create_rectangle(280, 260, WIDTH - 280, 320, fill="#000000", outline="white")
             self.canvas.create_text(WIDTH // 2, 290, text=msg, fill="#f9fafb", font=("Arial", 16, "bold"))
 
@@ -617,7 +652,7 @@ class AirplaneGameClient:
                 f"Stage {self.level}/{MAX_LEVEL} | 단계 처치: {self.kills_in_level}/{self.level_target}"
                 f" | P1 점수:{p1.score} ({'생존' if p1.alive else '사망'})"
                 f" | P2 점수:{p2.score} ({'생존' if p2.alive else '사망'})"
-                f" | 접속:{len(self.connected_players)}/2"
+                f" | 접속:{len(self.connected_players)}/{self.required_players}"
             ),
         )
         self.canvas.create_text(
@@ -625,7 +660,7 @@ class AirplaneGameClient:
             34,
             anchor="nw",
             fill="#fcd34d",
-            text="조작: 이동(WASD/방향키), 발사(Space), 일시정지(P), 재시작(R)",
+            text=f"모드:{'멀티' if self.network_enabled else '싱글'} | 조작: 이동(WASD/방향키), 발사(Space), 일시정지(P), 재시작(R)",
         )
 
     def draw_player(self, p: PlayerState, is_me: bool) -> None:
@@ -659,11 +694,33 @@ class AirplaneGameClient:
     def close(self) -> None:
         self.running = False
         try:
-            self.sock.close()
+            if self.sock is not None:
+                self.sock.close()
         except OSError:
             pass
         self.root.destroy()
 
+
+
+def choose_game_mode() -> str:
+    selected = {"mode": "multi"}
+
+    root = tk.Tk()
+    root.title("게임 모드 선택")
+    root.geometry("320x170")
+    root.resizable(False, False)
+
+    tk.Label(root, text="플레이 모드를 선택하세요", font=("Arial", 13, "bold")).pack(pady=16)
+
+    def set_mode(mode: str) -> None:
+        selected["mode"] = mode
+        root.destroy()
+
+    tk.Button(root, text="싱글플레이", width=20, command=lambda: set_mode("single")).pack(pady=6)
+    tk.Button(root, text="2인 멀티플레이", width=20, command=lambda: set_mode("multi")).pack(pady=6)
+
+    root.mainloop()
+    return selected["mode"]
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="2인 소켓 비행기 게임 클라이언트")
@@ -674,12 +731,17 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
+    mode = choose_game_mode()
+
     host = args.host.strip()
-    if not host:
+    if mode == "multi" and not host:
         try:
             entered = input("서버 IP를 입력하세요 (엔터=127.0.0.1): ").strip()
             host = entered or "127.0.0.1"
         except EOFError:
             host = "127.0.0.1"
 
-    AirplaneGameClient(host, args.port).run()
+    if mode == "single" and not host:
+        host = "127.0.0.1"
+
+    AirplaneGameClient(host, args.port, mode=mode).run()
