@@ -27,6 +27,8 @@ MAX_LEVEL = 10
 COUNTDOWN_SECONDS = 3
 POWERUP_DURATION = 15.0
 ITEM_FALL_SPEED = 2.4
+BOSS_FIRE_INTERVAL_BASE = 1.3
+ENEMY_SPREAD_FIRE_INTERVAL = 1.0
 
 
 @dataclass
@@ -46,6 +48,7 @@ class EnemyState:
     hp: int
     vx: float
     carrier: bool = False
+    boss: bool = False
 
 
 @dataclass
@@ -95,6 +98,9 @@ class AirplaneGameClient:
         self.level = 1
         self.kills_in_level = 0
         self.level_target = self.get_level_target(1)
+        self.stage_grunt_total = 0
+        self.stage_grunt_killed = 0
+        self.boss_spawned = False
         self.stage_item_quota = 1
         self.stage_item_spawned = 0
         self.winner_text = ""
@@ -109,6 +115,8 @@ class AirplaneGameClient:
         self.homing_until = {1: 0.0, 2: 0.0}
         self.countdown_remaining = COUNTDOWN_SECONDS
         self.last_enemy_fire = 0.0
+        self.last_enemy_spread_fire = 0.0
+        self.last_boss_fire = 0.0
         self.enemy_id_seed = 1
         self.last_state_send = 0.0
         self.last_input_send = 0.0
@@ -389,6 +397,7 @@ class AirplaneGameClient:
         self.level = 1
         self.kills_in_level = 0
         self.level_target = self.get_level_target(1)
+        self.init_stage_state()
         self.stage_item_quota = 1
         self.stage_item_spawned = 0
         self.winner_text = ""
@@ -396,10 +405,17 @@ class AirplaneGameClient:
         self.paused = False
         self.game_started = False
         self.last_enemy_fire = 0.0
+        self.last_enemy_spread_fire = 0.0
+        self.last_boss_fire = 0.0
         self.enemy_id_seed = 1
         self.last_fire_time = {1: 0.0, 2: 0.0}
         self.homing_until = {1: 0.0, 2: 0.0}
         self.countdown_remaining = COUNTDOWN_SECONDS
+
+    def init_stage_state(self) -> None:
+        self.stage_grunt_total = 6 + self.level * 2
+        self.stage_grunt_killed = 0
+        self.boss_spawned = False
 
     def send_input_if_needed(self) -> None:
         if not self.network_enabled:
@@ -493,18 +509,55 @@ class AirplaneGameClient:
         self.enemies = [e for e in self.enemies if e.y < HEIGHT + ENEMY_SIZE and e.hp > 0]
 
         now = time.time()
-        if now - self.last_enemy_fire > max(0.35, 1.1 - self.level * 0.08):
+        bosses = [e for e in self.enemies if e.boss and e.hp > 0]
+        grunts = [e for e in self.enemies if (not e.boss) and e.hp > 0]
+
+        # 일반 적 기본 사격
+        if now - self.last_enemy_fire > max(0.45, 1.15 - self.level * 0.07):
             self.last_enemy_fire = now
-            alive_enemies = [e for e in self.enemies if e.hp > 0]
-            if alive_enemies:
-                shooter = random.choice(alive_enemies)
-                target = self.pick_target_player(shooter)
-                dx = target.x - shooter.x
-                dy = max(1.0, target.y - shooter.y)
-                mag = math.sqrt(dx * dx + dy * dy)
-                vx = ENEMY_BULLET_SPEED * dx / mag
-                vy = ENEMY_BULLET_SPEED * dy / mag
-                self.missiles.append(MissileState(owner="enemy", x=shooter.x, y=shooter.y + ENEMY_SIZE, vx=vx, vy=vy))
+            if grunts:
+                shooter = random.choice(grunts)
+                self.fire_enemy_aimed(shooter)
+
+        # 졸병 절반 처치 이후 일반 적 랜덤 퍼짐 사격
+        if self.stage_grunt_killed >= max(1, self.stage_grunt_total // 2):
+            if now - self.last_enemy_spread_fire > ENEMY_SPREAD_FIRE_INTERVAL:
+                self.last_enemy_spread_fire = now
+                if grunts:
+                    shooter = random.choice(grunts)
+                    spread_count = 2 + self.level // 3
+                    self.fire_spread_burst(shooter.x, shooter.y + ENEMY_SIZE, spread_count, spread_deg=70, speed=ENEMY_BULLET_SPEED)
+
+        # 보스 불꽃 퍼짐 미사일
+        if bosses:
+            interval = max(0.35, BOSS_FIRE_INTERVAL_BASE - self.level * 0.06)
+            if now - self.last_boss_fire > interval:
+                self.last_boss_fire = now
+                boss = bosses[0]
+                flame_count = 3 + self.level  # 단계별 1개씩 증가
+                self.fire_spread_burst(boss.x, boss.y + ENEMY_SIZE, flame_count, spread_deg=110, speed=ENEMY_BULLET_SPEED + 1.2)
+
+    def fire_enemy_aimed(self, shooter: EnemyState) -> None:
+        target = self.pick_target_player(shooter)
+        dx = target.x - shooter.x
+        dy = max(1.0, target.y - shooter.y)
+        mag = math.sqrt(dx * dx + dy * dy)
+        vx = ENEMY_BULLET_SPEED * dx / mag
+        vy = ENEMY_BULLET_SPEED * dy / mag
+        self.missiles.append(MissileState(owner="enemy", x=shooter.x, y=shooter.y + ENEMY_SIZE, vx=vx, vy=vy))
+
+    def fire_spread_burst(self, x: float, y: float, count: int, spread_deg: float, speed: float) -> None:
+        if count <= 1:
+            self.missiles.append(MissileState(owner="enemy", x=x, y=y, vx=0.0, vy=speed))
+            return
+        start = -spread_deg / 2.0
+        step = spread_deg / (count - 1)
+        for i in range(count):
+            angle_deg = start + step * i
+            rad = math.radians(angle_deg)
+            vx = math.sin(rad) * speed
+            vy = math.cos(rad) * speed
+            self.missiles.append(MissileState(owner="enemy", x=x, y=y, vx=vx, vy=vy))
 
     def pick_target_player(self, shooter: EnemyState) -> PlayerState:
         candidates = [p for p in self.players.values() if p.alive]
@@ -590,8 +643,11 @@ class AirplaneGameClient:
                     self.finish_game(reason=f"플레이어 {p.player_id} 충돌")
 
     def on_enemy_destroyed(self, enemy: EnemyState, killer: int) -> None:
-        self.players[killer].score += 1
-        self.kills_in_level += 1
+        bonus = 3 if enemy.boss else 1
+        self.players[killer].score += bonus
+        self.kills_in_level += bonus
+        if not enemy.boss:
+            self.stage_grunt_killed += 1
         if enemy.carrier and self.stage_item_spawned < self.stage_item_quota:
             self.items.append(ItemState(kind="homing", x=enemy.x, y=enemy.y))
             self.stage_item_spawned += 1
@@ -599,34 +655,46 @@ class AirplaneGameClient:
     def check_level_progress(self) -> None:
         if self.game_over:
             return
+        boss_alive = any(e.boss and e.hp > 0 for e in self.enemies)
+        grunts_alive = any((not e.boss) and e.hp > 0 for e in self.enemies)
 
-        if self.kills_in_level >= self.level_target:
+        # 졸병 전멸 후 보스 등장
+        if self.stage_grunt_killed >= self.stage_grunt_total and not boss_alive and not self.boss_spawned:
+            self.spawn_boss_enemy()
+            self.boss_spawned = True
+            return
+
+        # 졸병이 남았는데 화면에 없으면 다음 웨이브 보충
+        if self.stage_grunt_killed < self.stage_grunt_total and not grunts_alive:
+            self.spawn_level_enemies(reset=False)
+            return
+
+        # 보스 처치 시 다음 단계
+        if self.boss_spawned and not boss_alive:
             if self.level >= MAX_LEVEL:
-                self.finish_game(reason="10단계 클리어")
+                self.finish_game(reason="10단계 보스 클리어")
                 return
-
             self.level += 1
             self.kills_in_level = 0
             self.level_target = self.get_level_target(self.level)
+            self.init_stage_state()
             self.stage_item_quota = self.level
             self.stage_item_spawned = 0
+            self.enemies.clear()
             self.spawn_level_enemies(reset=True)
-            return
-
-        # 단계 목표 처치 수가 현재 웨이브 적 수보다 큰 경우를 위해 증원 웨이브 추가
-        if not self.enemies:
-            self.spawn_level_enemies(reset=False)
 
     def spawn_level_enemies(self, reset: bool) -> None:
         if reset:
             self.enemies.clear()
+        if self.boss_spawned:
+            return
 
-        remaining = max(0, self.level_target - self.kills_in_level)
+        remaining = max(0, self.stage_grunt_total - self.stage_grunt_killed)
         if remaining == 0:
             return
 
         base_count = 4 + self.level * 2
-        count = min(base_count, remaining + 2)
+        count = min(base_count, remaining)
         hp = 1 if self.level <= 3 else (2 if self.level <= 7 else 3)
         min_y, max_y = (70, 220) if reset else (60, 180)
         remaining_carriers = max(0, self.stage_item_quota - self.stage_item_spawned)
@@ -638,6 +706,21 @@ class AirplaneGameClient:
             carrier = idx < remaining_carriers
             self.enemies.append(EnemyState(eid=self.enemy_id_seed, x=x, y=y, hp=hp, vx=vx, carrier=carrier))
             self.enemy_id_seed += 1
+
+    def spawn_boss_enemy(self) -> None:
+        boss_hp = 8 + self.level * 3
+        self.enemies.append(
+            EnemyState(
+                eid=self.enemy_id_seed,
+                x=WIDTH / 2,
+                y=110,
+                hp=boss_hp,
+                vx=2.2 + self.level * 0.15,
+                carrier=False,
+                boss=True,
+            )
+        )
+        self.enemy_id_seed += 1
 
     def finish_game(self, reason: str) -> None:
         if self.game_over:
@@ -678,6 +761,9 @@ class AirplaneGameClient:
             "level": self.level,
             "kills_in_level": self.kills_in_level,
             "level_target": self.level_target,
+            "stage_grunt_total": self.stage_grunt_total,
+            "stage_grunt_killed": self.stage_grunt_killed,
+            "boss_spawned": self.boss_spawned,
             "stage_item_quota": self.stage_item_quota,
             "stage_item_spawned": self.stage_item_spawned,
             "homing_until": self.homing_until,
@@ -703,6 +789,9 @@ class AirplaneGameClient:
         self.level = int(msg.get("level", self.level))
         self.kills_in_level = int(msg.get("kills_in_level", self.kills_in_level))
         self.level_target = int(msg.get("level_target", self.level_target))
+        self.stage_grunt_total = int(msg.get("stage_grunt_total", self.stage_grunt_total))
+        self.stage_grunt_killed = int(msg.get("stage_grunt_killed", self.stage_grunt_killed))
+        self.boss_spawned = bool(msg.get("boss_spawned", self.boss_spawned))
         self.stage_item_quota = int(msg.get("stage_item_quota", self.stage_item_quota))
         self.stage_item_spawned = int(msg.get("stage_item_spawned", self.stage_item_spawned))
         homing_until = msg.get("homing_until", self.homing_until)
@@ -783,12 +872,17 @@ class AirplaneGameClient:
         p1 = self.players.get(1, PlayerState(1, 0, 0))
         p2 = self.players.get(2)
         score_text = (
-            f"Stage {self.level}/{MAX_LEVEL} | 단계 처치: {self.kills_in_level}/{self.level_target}"
+            f"Stage {self.level}/{MAX_LEVEL} | 졸병 처치: {self.stage_grunt_killed}/{self.stage_grunt_total}"
             f" | P1 점수:{p1.score} ({'생존' if p1.alive else '사망'})"
         )
         if p2 is not None:
             score_text += f" | P2 점수:{p2.score} ({'생존' if p2.alive else '사망'})"
-        score_text += f" | 아이템:{self.stage_item_spawned}/{self.stage_item_quota} | 접속:{len(self.connected_players)}/{self.required_players}"
+        boss_alive = any(e.boss for e in self.enemies)
+        boss_status = "보스 출현" if boss_alive else ("보스 대기" if not self.boss_spawned else "보스 처치")
+        score_text += (
+            f" | {boss_status} | 아이템:{self.stage_item_spawned}/{self.stage_item_quota}"
+            f" | 접속:{len(self.connected_players)}/{self.required_players}"
+        )
 
         now = time.time()
         p1_buff = max(0, int(self.homing_until.get(1, 0.0) - now))
@@ -827,6 +921,9 @@ class AirplaneGameClient:
         x, y = e.x, e.y
         sprite = self.enemy_sprites.get(self.level, self.enemy_sprites[MAX_LEVEL])
         self.canvas.create_image(x, y, image=sprite)
+        if e.boss:
+            self.canvas.create_oval(x - 34, y - 34, x + 34, y + 34, outline="#f43f5e", width=3)
+            self.canvas.create_text(x, y - 28, text="BOSS", fill="#fecdd3", font=("Arial", 10, "bold"))
         if e.carrier:
             self.canvas.create_oval(x - 22, y - 22, x + 22, y + 22, outline="#fde047", width=2)
         self.canvas.create_text(x, y, text=str(e.hp), fill="white")
