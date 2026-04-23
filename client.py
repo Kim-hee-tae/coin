@@ -25,6 +25,8 @@ SEND_INTERVAL = 0.018
 SIM_INTERVAL = 0.01
 MAX_LEVEL = 10
 COUNTDOWN_SECONDS = 3
+POWERUP_DURATION = 15.0
+ITEM_FALL_SPEED = 2.4
 
 
 @dataclass
@@ -43,6 +45,7 @@ class EnemyState:
     y: float
     hp: int
     vx: float
+    carrier: bool = False
 
 
 @dataclass
@@ -52,6 +55,14 @@ class MissileState:
     y: float
     vx: float
     vy: float
+    homing: bool = False
+
+
+@dataclass
+class ItemState:
+    kind: str  # homing
+    x: float
+    y: float
 
 
 class AirplaneGameClient:
@@ -80,9 +91,12 @@ class AirplaneGameClient:
 
         self.enemies: list[EnemyState] = []
         self.missiles: list[MissileState] = []
+        self.items: list[ItemState] = []
         self.level = 1
         self.kills_in_level = 0
         self.level_target = self.get_level_target(1)
+        self.stage_item_quota = 1
+        self.stage_item_spawned = 0
         self.winner_text = ""
         self.game_over = False
         self.paused = False
@@ -92,6 +106,7 @@ class AirplaneGameClient:
         self.display_players: dict[int, PlayerState] = {}
 
         self.last_fire_time = {1: 0.0, 2: 0.0}
+        self.homing_until = {1: 0.0, 2: 0.0}
         self.countdown_remaining = COUNTDOWN_SECONDS
         self.last_enemy_fire = 0.0
         self.enemy_id_seed = 1
@@ -370,9 +385,12 @@ class AirplaneGameClient:
         self.init_players()
         self.enemies.clear()
         self.missiles.clear()
+        self.items.clear()
         self.level = 1
         self.kills_in_level = 0
         self.level_target = self.get_level_target(1)
+        self.stage_item_quota = 1
+        self.stage_item_spawned = 0
         self.winner_text = ""
         self.game_over = False
         self.paused = False
@@ -380,6 +398,7 @@ class AirplaneGameClient:
         self.last_enemy_fire = 0.0
         self.enemy_id_seed = 1
         self.last_fire_time = {1: 0.0, 2: 0.0}
+        self.homing_until = {1: 0.0, 2: 0.0}
         self.countdown_remaining = COUNTDOWN_SECONDS
 
     def send_input_if_needed(self) -> None:
@@ -425,6 +444,7 @@ class AirplaneGameClient:
         self.update_players(dt)
         self.update_enemies(dt)
         self.update_missiles(dt)
+        self.update_items(dt)
         self.handle_collisions()
         self.check_level_progress()
 
@@ -457,7 +477,10 @@ class AirplaneGameClient:
         p = self.players[pid]
         if not p.alive:
             return
-        self.missiles.append(MissileState(owner=f"p{pid}", x=p.x, y=p.y - PLAYER_SIZE, vx=0, vy=-PLAYER_BULLET_SPEED))
+        homing = time.time() < self.homing_until.get(pid, 0.0)
+        self.missiles.append(
+            MissileState(owner=f"p{pid}", x=p.x, y=p.y - PLAYER_SIZE, vx=0, vy=-PLAYER_BULLET_SPEED, homing=homing)
+        )
 
     def update_enemies(self, dt: float) -> None:
         for e in self.enemies:
@@ -488,9 +511,43 @@ class AirplaneGameClient:
 
     def update_missiles(self, dt: float) -> None:
         for m in self.missiles:
+            if m.homing and m.owner.startswith("p"):
+                target = self.pick_nearest_enemy(m.x, m.y)
+                if target is not None:
+                    dx = target.x - m.x
+                    dy = target.y - m.y
+                    mag = max(1.0, math.sqrt(dx * dx + dy * dy))
+                    desired_vx = PLAYER_BULLET_SPEED * dx / mag
+                    desired_vy = PLAYER_BULLET_SPEED * dy / mag
+                    turn = 0.28
+                    m.vx += (desired_vx - m.vx) * turn
+                    m.vy += (desired_vy - m.vy) * turn
             m.x += m.vx * dt * 60
             m.y += m.vy * dt * 60
         self.missiles = [m for m in self.missiles if -30 < m.x < WIDTH + 30 and -30 < m.y < HEIGHT + 30]
+
+    def pick_nearest_enemy(self, x: float, y: float) -> EnemyState | None:
+        living = [e for e in self.enemies if e.hp > 0]
+        if not living:
+            return None
+        return min(living, key=lambda e: abs(e.x - x) + abs(e.y - y))
+
+    def update_items(self, dt: float) -> None:
+        active: list[ItemState] = []
+        for item in self.items:
+            item.y += ITEM_FALL_SPEED * dt * 60
+            collected = False
+            for pid, p in self.players.items():
+                if not p.alive:
+                    continue
+                if abs(item.x - p.x) < 24 and abs(item.y - p.y) < 24:
+                    if item.kind == "homing":
+                        self.homing_until[pid] = time.time() + POWERUP_DURATION
+                    collected = True
+                    break
+            if not collected and item.y < HEIGHT + 40:
+                active.append(item)
+        self.items = active
 
     def handle_collisions(self) -> None:
         kept_missiles: list[MissileState] = []
@@ -505,8 +562,7 @@ class AirplaneGameClient:
                         hit = True
                         if e.hp <= 0:
                             killer = int(m.owner[1])
-                            self.players[killer].score += 1
-                            self.kills_in_level += 1
+                            self.on_enemy_destroyed(e, killer)
                         break
             else:
                 for p in self.players.values():
@@ -530,6 +586,13 @@ class AirplaneGameClient:
                     p.alive = False
                     self.finish_game(reason=f"플레이어 {p.player_id} 충돌")
 
+    def on_enemy_destroyed(self, enemy: EnemyState, killer: int) -> None:
+        self.players[killer].score += 1
+        self.kills_in_level += 1
+        if enemy.carrier and self.stage_item_spawned < self.stage_item_quota:
+            self.items.append(ItemState(kind="homing", x=enemy.x, y=enemy.y))
+            self.stage_item_spawned += 1
+
     def check_level_progress(self) -> None:
         if self.game_over:
             return
@@ -542,6 +605,8 @@ class AirplaneGameClient:
             self.level += 1
             self.kills_in_level = 0
             self.level_target = self.get_level_target(self.level)
+            self.stage_item_quota = self.level
+            self.stage_item_spawned = 0
             self.spawn_level_enemies(reset=True)
             return
 
@@ -561,12 +626,14 @@ class AirplaneGameClient:
         count = min(base_count, remaining + 2)
         hp = 1 if self.level <= 3 else (2 if self.level <= 7 else 3)
         min_y, max_y = (70, 220) if reset else (60, 180)
+        remaining_carriers = max(0, self.stage_item_quota - self.stage_item_spawned)
 
-        for _ in range(count):
+        for idx in range(count):
             x = random.randint(ENEMY_SIZE + 10, WIDTH - ENEMY_SIZE - 10)
             y = random.randint(min_y, max_y)
             vx = random.choice([-1, 1]) * (1.2 + self.level * 0.15)
-            self.enemies.append(EnemyState(eid=self.enemy_id_seed, x=x, y=y, hp=hp, vx=vx))
+            carrier = idx < remaining_carriers
+            self.enemies.append(EnemyState(eid=self.enemy_id_seed, x=x, y=y, hp=hp, vx=vx, carrier=carrier))
             self.enemy_id_seed += 1
 
     def finish_game(self, reason: str) -> None:
@@ -604,9 +671,13 @@ class AirplaneGameClient:
             "players": {str(pid): asdict(p) for pid, p in self.players.items()},
             "enemies": [asdict(e) for e in self.enemies],
             "missiles": [asdict(m) for m in self.missiles],
+            "items": [asdict(i) for i in self.items],
             "level": self.level,
             "kills_in_level": self.kills_in_level,
             "level_target": self.level_target,
+            "stage_item_quota": self.stage_item_quota,
+            "stage_item_spawned": self.stage_item_spawned,
+            "homing_until": self.homing_until,
             "game_over": self.game_over,
             "winner_text": self.winner_text,
             "paused": self.paused,
@@ -625,9 +696,14 @@ class AirplaneGameClient:
 
         self.enemies = [EnemyState(**e) for e in msg.get("enemies", [])]
         self.missiles = [MissileState(**m) for m in msg.get("missiles", [])]
+        self.items = [ItemState(**i) for i in msg.get("items", [])]
         self.level = int(msg.get("level", self.level))
         self.kills_in_level = int(msg.get("kills_in_level", self.kills_in_level))
         self.level_target = int(msg.get("level_target", self.level_target))
+        self.stage_item_quota = int(msg.get("stage_item_quota", self.stage_item_quota))
+        self.stage_item_spawned = int(msg.get("stage_item_spawned", self.stage_item_spawned))
+        homing_until = msg.get("homing_until", self.homing_until)
+        self.homing_until = {int(k): float(v) for k, v in homing_until.items()}
         self.game_over = bool(msg.get("game_over", False))
         self.winner_text = msg.get("winner_text", "")
         self.paused = bool(msg.get("paused", False))
@@ -654,6 +730,8 @@ class AirplaneGameClient:
 
         for e in self.enemies:
             self.draw_enemy(e)
+        for item in self.items:
+            self.draw_item(item)
         for m in self.missiles:
             self.draw_missile(m)
         for pid in sorted(self.players.keys()):
@@ -707,7 +785,14 @@ class AirplaneGameClient:
         )
         if p2 is not None:
             score_text += f" | P2 점수:{p2.score} ({'생존' if p2.alive else '사망'})"
-        score_text += f" | 접속:{len(self.connected_players)}/{self.required_players}"
+        score_text += f" | 아이템:{self.stage_item_spawned}/{self.stage_item_quota} | 접속:{len(self.connected_players)}/{self.required_players}"
+
+        now = time.time()
+        p1_buff = max(0, int(self.homing_until.get(1, 0.0) - now))
+        buff_text = f"유도미사일 P1:{p1_buff}s"
+        if p2 is not None:
+            p2_buff = max(0, int(self.homing_until.get(2, 0.0) - now))
+            buff_text += f" / P2:{p2_buff}s"
         self.canvas.create_text(
             10,
             10,
@@ -720,7 +805,10 @@ class AirplaneGameClient:
             34,
             anchor="nw",
             fill="#fcd34d",
-            text=f"모드:{'멀티' if self.network_enabled else '싱글'} | 조작: 이동(WASD/방향키), 발사(Space), 일시정지(P), 재시작(R)",
+            text=(
+                f"모드:{'멀티' if self.network_enabled else '싱글'} | "
+                f"{buff_text} | 조작: 이동(WASD/방향키), 발사(Space), 일시정지(P), 재시작(R)"
+            ),
         )
 
     def draw_player(self, p: PlayerState, is_me: bool) -> None:
@@ -736,7 +824,15 @@ class AirplaneGameClient:
         x, y = e.x, e.y
         sprite = self.enemy_sprites.get(self.level, self.enemy_sprites[MAX_LEVEL])
         self.canvas.create_image(x, y, image=sprite)
+        if e.carrier:
+            self.canvas.create_oval(x - 22, y - 22, x + 22, y + 22, outline="#fde047", width=2)
         self.canvas.create_text(x, y, text=str(e.hp), fill="white")
+
+    def draw_item(self, item: ItemState) -> None:
+        x, y = item.x, item.y
+        if item.kind == "homing":
+            self.canvas.create_oval(x - 10, y - 10, x + 10, y + 10, fill="#22d3ee", outline="#e0f2fe", width=2)
+            self.canvas.create_text(x, y, text="H", fill="#082f49", font=("Arial", 10, "bold"))
 
     def draw_missile(self, m: MissileState) -> None:
         color = "#a78bfa"
