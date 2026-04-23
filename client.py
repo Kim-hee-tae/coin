@@ -489,6 +489,9 @@ class AirplaneGameClient:
                 e.vx *= -1
                 e.y += 15
 
+        # 화면 아래로 완전히 내려간 적은 제거해서 다음 웨이브가 정상 생성되게 함
+        self.enemies = [e for e in self.enemies if e.y < HEIGHT + ENEMY_SIZE and e.hp > 0]
+
         now = time.time()
         if now - self.last_enemy_fire > max(0.35, 1.1 - self.level * 0.08):
             self.last_enemy_fire = now
