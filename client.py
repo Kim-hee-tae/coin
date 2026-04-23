@@ -636,12 +636,6 @@ class AirplaneGameClient:
         self.missiles = kept_missiles
         self.enemies = [e for e in self.enemies if e.hp > 0]
 
-        for e in self.enemies:
-            for p in self.players.values():
-                if p.alive and abs(e.x - p.x) < PLAYER_SIZE and abs(e.y - p.y) < PLAYER_SIZE:
-                    p.alive = False
-                    self.finish_game(reason=f"플레이어 {p.player_id} 충돌")
-
     def on_enemy_destroyed(self, enemy: EnemyState, killer: int) -> None:
         bonus = 3 if enemy.boss else 1
         self.players[killer].score += bonus
@@ -910,8 +904,32 @@ class AirplaneGameClient:
 
     def draw_player(self, p: PlayerState, is_me: bool) -> None:
         x, y = p.x, p.y
-        sprite = self.player_sprites.get(p.player_id, self.player_sprites[1])
-        self.canvas.create_image(x, y, image=sprite)
+        body_color = "#ef4444" if p.player_id == 1 else "#3b82f6"
+        wing_color = "#cbd5e1"
+        if not p.alive:
+            body_color = "#6b7280"
+            wing_color = "#9ca3af"
+
+        # 사각 프레임 이미지 대신 실제 비행기 형태로 직접 렌더링
+        fuselage = [
+            x,
+            y - 24,
+            x - 9,
+            y + 10,
+            x,
+            y + 22,
+            x + 9,
+            y + 10,
+        ]
+        left_wing = [x - 9, y + 4, x - 28, y + 14, x - 10, y + 16]
+        right_wing = [x + 9, y + 4, x + 28, y + 14, x + 10, y + 16]
+        tail = [x - 5, y + 18, x, y + 30, x + 5, y + 18]
+
+        self.canvas.create_polygon(fuselage, fill=body_color, outline="white", width=2)
+        self.canvas.create_polygon(left_wing, fill=wing_color, outline="white", width=1)
+        self.canvas.create_polygon(right_wing, fill=wing_color, outline="white", width=1)
+        self.canvas.create_polygon(tail, fill=wing_color, outline="white", width=1)
+        self.canvas.create_oval(x - 3, y - 8, x + 3, y - 2, fill="#f8fafc", outline="")
         if not p.alive:
             self.canvas.create_oval(x - 20, y - 20, x + 20, y + 20, outline="#6b7280", width=3)
         tag = "나" if is_me else f"상대(P{p.player_id})"
