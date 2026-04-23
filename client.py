@@ -717,6 +717,9 @@ def choose_game_mode() -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="2인 소켓 비행기 게임 클라이언트")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--single", action="store_true", help="싱글플레이로 즉시 시작 (서버 불필요)")
+    mode_group.add_argument("--multi", action="store_true", help="멀티플레이로 즉시 시작 (서버 필요)")
     parser.add_argument("--host", default="", help="서버 IP (미입력 시 실행 중에 질문)")
     parser.add_argument("--port", type=int, default=5000, help="서버 포트")
     return parser.parse_args()
@@ -724,7 +727,12 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
-    mode = choose_game_mode()
+    if args.single:
+        mode = "single"
+    elif args.multi:
+        mode = "multi"
+    else:
+        mode = choose_game_mode()
 
     host = args.host.strip()
     if mode == "multi" and not host:

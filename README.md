@@ -57,6 +57,9 @@ bash scripts/build_client_exe.sh
 
 > 명령행 인자 방식도 가능:
 > `AirBattleClient.exe --host 192.168.0.10 --port 5000`
+>
+> 서버 없이 싱글플레이로 바로 시작:
+> `AirBattleClient.exe --single`
 
 ## 조작키
 - 이동: 방향키 또는 `WASD`
