@@ -103,6 +103,9 @@ class AirplaneGameClient:
         self.root.title("2인 비행기 전쟁 (10단계)")
         self.canvas = tk.Canvas(self.root, width=WIDTH, height=HEIGHT, bg="#061826")
         self.canvas.pack()
+        self.player_sprites: dict[int, tk.PhotoImage] = {}
+        self.enemy_sprites: dict[int, tk.PhotoImage] = {}
+        self.build_sprite_assets()
 
         self.status_var = tk.StringVar(value="서버 연결 중...")
         tk.Label(self.root, textvariable=self.status_var, anchor="w").pack(fill="x")
@@ -113,6 +116,70 @@ class AirplaneGameClient:
 
     def get_level_target(self, level: int) -> int:
         return 5 + (level - 1) * 3
+
+    def build_sprite_assets(self) -> None:
+        self.player_sprites[1] = self.make_player_sprite("#ef4444")
+        self.player_sprites[2] = self.make_player_sprite("#3b82f6")
+        for level in range(1, MAX_LEVEL + 1):
+            self.enemy_sprites[level] = self.make_enemy_sprite(level)
+
+    def make_player_sprite(self, primary: str) -> tk.PhotoImage:
+        size = 42
+        bg = "#061826"
+        img = tk.PhotoImage(width=size, height=size)
+        img.put(bg, to=(0, 0, size, size))
+
+        # 기수/동체
+        for y in range(4, 34):
+            half = max(1, (y - 4) // 2)
+            cx = size // 2
+            img.put(primary, to=(cx - half, y, cx + half + 1, y + 1))
+        # 꼬리
+        img.put("#e5e7eb", to=(size // 2 - 2, 34, size // 2 + 3, 40))
+        # 날개
+        img.put(primary, to=(7, 22, 35, 26))
+        # 캐노피
+        img.put("#f8fafc", to=(size // 2 - 2, 10, size // 2 + 3, 15))
+        return img
+
+    def make_enemy_sprite(self, level: int) -> tk.PhotoImage:
+        size = 38
+        bg = "#061826"
+        palette = [
+            "#f97316",
+            "#f59e0b",
+            "#eab308",
+            "#84cc16",
+            "#22c55e",
+            "#14b8a6",
+            "#06b6d4",
+            "#3b82f6",
+            "#8b5cf6",
+            "#ec4899",
+        ]
+        primary = palette[(level - 1) % len(palette)]
+        secondary = "#111827"
+
+        img = tk.PhotoImage(width=size, height=size)
+        img.put(bg, to=(0, 0, size, size))
+
+        # 단계별 형태 변형 (날개 폭/몸통 높이)
+        wing = 9 + (level % 4) * 2
+        top = 6 + (level % 3)
+        body_h = 20 + (level % 5)
+        cx = size // 2
+
+        # 몸통
+        img.put(primary, to=(cx - 4, top, cx + 5, top + body_h))
+        # 날개
+        img.put(primary, to=(cx - wing, top + 9, cx + wing + 1, top + 13))
+        # 꼬리
+        img.put(primary, to=(cx - 8, top + body_h - 2, cx + 9, top + body_h + 2))
+        # 무늬
+        stripe_y = top + 4 + (level % 4) * 3
+        img.put(secondary, to=(cx - wing + 2, stripe_y, cx + wing - 1, stripe_y + 2))
+        img.put("#f8fafc", to=(cx - 2, top + 2, cx + 3, top + 6))
+        return img
 
     def init_players(self) -> None:
         self.players = {1: PlayerState(1, WIDTH * 0.25, HEIGHT - 60)}
@@ -657,18 +724,18 @@ class AirplaneGameClient:
         )
 
     def draw_player(self, p: PlayerState, is_me: bool) -> None:
-        color = "#4ade80" if is_me else "#f87171"
-        if not p.alive:
-            color = "#6b7280"
         x, y = p.x, p.y
-        points = [x, y - PLAYER_SIZE, x - PLAYER_SIZE, y + PLAYER_SIZE, x, y + PLAYER_SIZE // 2, x + PLAYER_SIZE, y + PLAYER_SIZE]
-        self.canvas.create_polygon(points, fill=color, outline="white", width=2)
+        sprite = self.player_sprites.get(p.player_id, self.player_sprites[1])
+        self.canvas.create_image(x, y, image=sprite)
+        if not p.alive:
+            self.canvas.create_oval(x - 20, y - 20, x + 20, y + 20, outline="#6b7280", width=3)
         tag = "나" if is_me else f"상대(P{p.player_id})"
         self.canvas.create_text(x, y + PLAYER_SIZE + 14, text=tag, fill="white")
 
     def draw_enemy(self, e: EnemyState) -> None:
         x, y = e.x, e.y
-        self.canvas.create_rectangle(x - ENEMY_SIZE, y - ENEMY_SIZE, x + ENEMY_SIZE, y + ENEMY_SIZE, fill="#ef4444", outline="white")
+        sprite = self.enemy_sprites.get(self.level, self.enemy_sprites[MAX_LEVEL])
+        self.canvas.create_image(x, y, image=sprite)
         self.canvas.create_text(x, y, text=str(e.hp), fill="white")
 
     def draw_missile(self, m: MissileState) -> None:
