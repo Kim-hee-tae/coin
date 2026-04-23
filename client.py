@@ -15,7 +15,7 @@ import tkinter as tk
 from dataclasses import asdict, dataclass
 
 ENCODING = "utf-8"
-WIDTH, HEIGHT = 900, 600
+WIDTH, HEIGHT = 1350, 900
 PLAYER_SIZE = 18
 ENEMY_SIZE = 16
 PLAYER_SPEED = 7
@@ -25,7 +25,7 @@ SEND_INTERVAL = 0.018
 SIM_INTERVAL = 0.01
 MAX_LEVEL = 10
 COUNTDOWN_SECONDS = 3
-POWERUP_DURATION = 15.0
+POWERUP_DURATION = 3.0
 ITEM_FALL_SPEED = 2.4
 BOSS_FIRE_INTERVAL_BASE = 1.3
 ENEMY_SPREAD_FIRE_INTERVAL = 1.0
@@ -38,6 +38,7 @@ class PlayerState:
     y: float
     alive: bool = True
     score: int = 0
+    lives: int = 2
 
 
 @dataclass
@@ -49,6 +50,10 @@ class EnemyState:
     vx: float
     carrier: bool = False
     boss: bool = False
+    pattern: str = "zigzag"
+    base_x: float = 0.0
+    age: float = 0.0
+    direction: int = 1
 
 
 @dataclass
@@ -113,6 +118,8 @@ class AirplaneGameClient:
 
         self.last_fire_time = {1: 0.0, 2: 0.0}
         self.homing_until = {1: 0.0, 2: 0.0}
+        self.bombs_remaining = {1: 2, 2: 2}
+        self.invuln_until = {1: 0.0, 2: 0.0}
         self.countdown_remaining = COUNTDOWN_SECONDS
         self.last_enemy_fire = 0.0
         self.last_enemy_spread_fire = 0.0
@@ -272,15 +279,29 @@ class AirplaneGameClient:
             self.local_input["fire"] = True
         elif k == "p":
             if self.network_enabled:
-                self.send_control("toggle_pause")
+                if self.player_id == 1:
+                    self.handle_control_message({"action": "toggle_pause", "from": 1})
+                else:
+                    self.send_control("toggle_pause")
             elif self.game_started and not self.game_over:
                 self.paused = not self.paused
         elif k == "r":
             if self.network_enabled:
-                self.send_control("restart")
+                if self.player_id == 1:
+                    self.handle_control_message({"action": "restart", "from": 1})
+                else:
+                    self.send_control("restart")
             else:
                 self.reset_match_state()
                 self.try_schedule_start_countdown("재시작")
+        elif k == "b":
+            if self.network_enabled:
+                if self.player_id == 1:
+                    self.handle_control_message({"action": "bomb", "from": 1})
+                else:
+                    self.send_control("bomb")
+            else:
+                self.use_bomb(1)
 
     def on_key_release(self, event: tk.Event) -> None:
         k = event.keysym.lower()
@@ -370,6 +391,7 @@ class AirplaneGameClient:
 
     def handle_control_message(self, msg: dict) -> None:
         action = msg.get("action")
+        actor = int(msg.get("from", self.player_id or 1))
         if action == "toggle_pause" and self.game_started and not self.game_over:
             self.paused = not self.paused
             state = "일시정지" if self.paused else "재시작"
@@ -377,6 +399,21 @@ class AirplaneGameClient:
         elif action == "restart":
             self.reset_match_state()
             self.try_schedule_start_countdown("재시작")
+        elif action == "bomb":
+            self.use_bomb(actor)
+
+    def use_bomb(self, player_id: int) -> None:
+        if self.bombs_remaining.get(player_id, 0) <= 0:
+            return
+        self.bombs_remaining[player_id] -= 1
+        removed: list[EnemyState] = []
+        for e in self.enemies:
+            if not e.boss and e.hp > 0:
+                e.hp = 0
+                removed.append(e)
+        for e in removed:
+            self.on_enemy_destroyed(e, player_id)
+        self.enemies = [e for e in self.enemies if e.hp > 0]
 
     def try_schedule_start_countdown(self, reason: str) -> None:
         if len(self.connected_players) < self.required_players:
@@ -410,6 +447,8 @@ class AirplaneGameClient:
         self.enemy_id_seed = 1
         self.last_fire_time = {1: 0.0, 2: 0.0}
         self.homing_until = {1: 0.0, 2: 0.0}
+        self.bombs_remaining = {1: 2, 2: 2}
+        self.invuln_until = {1: 0.0, 2: 0.0}
         self.countdown_remaining = COUNTDOWN_SECONDS
 
     def init_stage_state(self) -> None:
@@ -500,13 +539,37 @@ class AirplaneGameClient:
 
     def update_enemies(self, dt: float) -> None:
         for e in self.enemies:
-            e.x += e.vx * dt * 60
-            if e.x < ENEMY_SIZE or e.x > WIDTH - ENEMY_SIZE:
-                e.vx *= -1
-                e.y += 15
+            if e.boss:
+                e.x += e.vx * dt * 60
+                if e.x < 80 or e.x > WIDTH - 80:
+                    e.vx *= -1
+                continue
+
+            e.age += dt
+            fall_speed = (1.0 + self.level * 0.12) * dt * 60
+            if e.pattern == "zigzag":
+                amp = 35 + self.level * 3
+                freq = 2.2 + self.level * 0.05
+                e.y += fall_speed
+                e.x = e.base_x + math.sin(e.age * freq) * amp
+            elif e.pattern == "circle":
+                amp = 28 + self.level * 2
+                freq = 2.8 + self.level * 0.06
+                e.y += fall_speed * 0.9
+                e.x = e.base_x + math.cos(e.age * freq) * amp
+                e.y += math.sin(e.age * freq) * 0.7
+            else:  # swoop
+                amp = 30 + self.level * 2
+                freq = 2.4 + self.level * 0.05
+                e.x = e.base_x + math.sin(e.age * freq) * amp
+                # 일부 적은 내려갔다가 원을 그리며 상승 후 다시 하강
+                if 1.6 < e.age < 3.1:
+                    e.y -= fall_speed * 0.55
+                else:
+                    e.y += fall_speed
 
         # 화면 아래로 완전히 내려간 적은 제거해서 다음 웨이브가 정상 생성되게 함
-        self.enemies = [e for e in self.enemies if e.y < HEIGHT + ENEMY_SIZE and e.hp > 0]
+        self.enemies = [e for e in self.enemies if -120 < e.y < HEIGHT + ENEMY_SIZE and e.hp > 0]
 
         now = time.time()
         bosses = [e for e in self.enemies if e.boss and e.hp > 0]
@@ -621,13 +684,24 @@ class AirplaneGameClient:
                             self.on_enemy_destroyed(e, killer)
                         break
             else:
+                now = time.time()
                 for p in self.players.values():
                     if not p.alive:
                         continue
+                    if now < self.invuln_until.get(p.player_id, 0.0):
+                        continue
                     if abs(m.x - p.x) < PLAYER_SIZE and abs(m.y - p.y) < PLAYER_SIZE:
-                        p.alive = False
                         hit = True
-                        self.finish_game(reason=f"플레이어 {p.player_id} 피격")
+                        if p.lives > 1:
+                            p.lives -= 1
+                            # 피격 후 잠깐 무적 + 위치 초기화
+                            self.invuln_until[p.player_id] = now + 1.2
+                            p.x = WIDTH * (0.25 if p.player_id == 1 else 0.75)
+                            p.y = HEIGHT - 80
+                        else:
+                            p.lives = 0
+                            p.alive = False
+                            self.finish_game(reason=f"플레이어 {p.player_id} 피격")
                         break
 
             if not hit:
@@ -695,10 +769,28 @@ class AirplaneGameClient:
 
         for idx in range(count):
             x = random.randint(ENEMY_SIZE + 10, WIDTH - ENEMY_SIZE - 10)
-            y = random.randint(min_y, max_y)
+            y = random.randint(-110, -20) if reset else random.randint(-80, -20)
             vx = random.choice([-1, 1]) * (1.2 + self.level * 0.15)
             carrier = idx < remaining_carriers
-            self.enemies.append(EnemyState(eid=self.enemy_id_seed, x=x, y=y, hp=hp, vx=vx, carrier=carrier))
+            roll = random.random()
+            if self.level >= 4 and roll < 0.2:
+                pattern = "swoop"
+            elif self.level >= 2 and roll < 0.55:
+                pattern = "circle"
+            else:
+                pattern = "zigzag"
+            self.enemies.append(
+                EnemyState(
+                    eid=self.enemy_id_seed,
+                    x=x,
+                    y=y,
+                    hp=hp,
+                    vx=vx,
+                    carrier=carrier,
+                    pattern=pattern,
+                    base_x=float(x),
+                )
+            )
             self.enemy_id_seed += 1
 
     def spawn_boss_enemy(self) -> None:
@@ -761,6 +853,8 @@ class AirplaneGameClient:
             "stage_item_quota": self.stage_item_quota,
             "stage_item_spawned": self.stage_item_spawned,
             "homing_until": self.homing_until,
+            "bombs_remaining": self.bombs_remaining,
+            "invuln_until": self.invuln_until,
             "game_over": self.game_over,
             "winner_text": self.winner_text,
             "paused": self.paused,
@@ -790,6 +884,10 @@ class AirplaneGameClient:
         self.stage_item_spawned = int(msg.get("stage_item_spawned", self.stage_item_spawned))
         homing_until = msg.get("homing_until", self.homing_until)
         self.homing_until = {int(k): float(v) for k, v in homing_until.items()}
+        bombs_remaining = msg.get("bombs_remaining", self.bombs_remaining)
+        self.bombs_remaining = {int(k): int(v) for k, v in bombs_remaining.items()}
+        invuln_until = msg.get("invuln_until", self.invuln_until)
+        self.invuln_until = {int(k): float(v) for k, v in invuln_until.items()}
         self.game_over = bool(msg.get("game_over", False))
         self.winner_text = msg.get("winner_text", "")
         self.paused = bool(msg.get("paused", False))
@@ -867,10 +965,10 @@ class AirplaneGameClient:
         p2 = self.players.get(2)
         score_text = (
             f"Stage {self.level}/{MAX_LEVEL} | 졸병 처치: {self.stage_grunt_killed}/{self.stage_grunt_total}"
-            f" | P1 점수:{p1.score} ({'생존' if p1.alive else '사망'})"
+            f" | P1 점수:{p1.score} / 목숨:{p1.lives} / 폭탄:{self.bombs_remaining.get(1, 0)}"
         )
         if p2 is not None:
-            score_text += f" | P2 점수:{p2.score} ({'생존' if p2.alive else '사망'})"
+            score_text += f" | P2 점수:{p2.score} / 목숨:{p2.lives} / 폭탄:{self.bombs_remaining.get(2, 0)}"
         boss_alive = any(e.boss for e in self.enemies)
         boss_status = "보스 출현" if boss_alive else ("보스 대기" if not self.boss_spawned else "보스 처치")
         score_text += (
@@ -898,7 +996,7 @@ class AirplaneGameClient:
             fill="#fcd34d",
             text=(
                 f"모드:{'멀티' if self.network_enabled else '싱글'} | "
-                f"{buff_text} | 조작: 이동(WASD/방향키), 발사(Space), 일시정지(P), 재시작(R)"
+                f"{buff_text} | 조작: 이동(WASD/방향키), 발사(Space), 폭탄(B), 일시정지(P), 재시작(R)"
             ),
         )
 
@@ -930,6 +1028,8 @@ class AirplaneGameClient:
         self.canvas.create_polygon(right_wing, fill=wing_color, outline="white", width=1)
         self.canvas.create_polygon(tail, fill=wing_color, outline="white", width=1)
         self.canvas.create_oval(x - 3, y - 8, x + 3, y - 2, fill="#f8fafc", outline="")
+        if time.time() < self.invuln_until.get(p.player_id, 0.0):
+            self.canvas.create_oval(x - 26, y - 26, x + 26, y + 26, outline="#22d3ee", width=2)
         if not p.alive:
             self.canvas.create_oval(x - 20, y - 20, x + 20, y + 20, outline="#6b7280", width=3)
         tag = "나" if is_me else f"상대(P{p.player_id})"
